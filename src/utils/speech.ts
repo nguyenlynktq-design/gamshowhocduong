@@ -169,38 +169,44 @@ function speakWithWebSpeech(
 }
 
 /**
- * Split text into concise chunks (<= 180 chars)
+ * Multi-tier sequential player for list of Vietnamese text chunks
  */
-function createFastChunks(
-  questionText: string,
-  options: { A: string; B: string; C: string; D: string }
-): string[] {
-  const cleanQ = questionText.replace(/\?+$/, '').trim();
-  const chunk1 = `${cleanQ}?`;
-  const optionsTextAll = `A: ${options.A}. B: ${options.B}. C: ${options.C}. D: ${options.D}.`;
-
-  if (optionsTextAll.length <= 180) {
-    return [chunk1, optionsTextAll];
-  }
-
-  const optionsAB = `A: ${options.A}. B: ${options.B}.`;
-  const optionsCD = `C: ${options.C}. D: ${options.D}.`;
-  return [chunk1, optionsAB, optionsCD];
-}
-
-/**
- * Main reading function with multi-tier failover
- */
-export function readQuestionImmediately(
-  questionText: string,
-  options: { A: string; B: string; C: string; D: string },
+export function readTextImmediately(
+  rawChunks: string[],
   opts: SpeakOptions = {}
 ) {
   stopSpeaking();
   isPlaying = true;
   opts.onStart?.();
 
-  const chunks = createFastChunks(questionText, options);
+  // Normalize and split chunks if too long (> 180 chars)
+  const chunks: string[] = [];
+  for (const raw of rawChunks) {
+    const trimmed = raw.replace(/[#*]+/g, '').trim();
+    if (!trimmed) continue;
+    if (trimmed.length <= 180) {
+      chunks.push(trimmed);
+    } else {
+      const sentences = trimmed.split(/(?<=[.?!;:])\s+/);
+      let curr = '';
+      for (const s of sentences) {
+        if ((curr + ' ' + s).trim().length <= 180) {
+          curr = (curr + ' ' + s).trim();
+        } else {
+          if (curr) chunks.push(curr);
+          curr = s.slice(0, 180);
+        }
+      }
+      if (curr) chunks.push(curr);
+    }
+  }
+
+  if (chunks.length === 0) {
+    isPlaying = false;
+    opts.onEnd?.();
+    return;
+  }
+
   let chunkIndex = 0;
   let useDirectFallback = false;
 
@@ -212,7 +218,6 @@ export function readQuestionImmediately(
     }
 
     const currentText = chunks[chunkIndex];
-    // Tier 1: Try /api/tts. If it failed once, switch to Tier 2 (Direct Google TTS)
     const audioUrl = useDirectFallback
       ? `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodeURIComponent(currentText)}`
       : `/api/tts?text=${encodeURIComponent(currentText)}`;
@@ -230,12 +235,9 @@ export function readQuestionImmediately(
     audio.onerror = () => {
       console.warn('Audio stream failed for chunk, trying next tier...');
       if (!useDirectFallback) {
-        // Switch to Tier 2 (Direct Google TTS)
         useDirectFallback = true;
         playChunk();
       } else {
-        // Both Audio tiers failed (e.g. strict firewall / offline) -> Fallback to Tier 3 (Web Speech API)
-        console.warn('Falling back to browser native Web Speech API');
         const remainingChunks = chunks.slice(chunkIndex);
         speakWithWebSpeech(remainingChunks, opts);
       }
@@ -246,7 +248,6 @@ export function readQuestionImmediately(
     };
 
     audio.play().catch(() => {
-      // If playback fails, try Tier 2 or Tier 3
       if (!useDirectFallback) {
         useDirectFallback = true;
         playChunk();
@@ -258,6 +259,61 @@ export function readQuestionImmediately(
   };
 
   playChunk();
+}
+
+/**
+ * Split question & options into concise chunks (<= 180 chars)
+ */
+function createQuestionChunks(
+  questionText: string,
+  options: { A: string; B: string; C: string; D: string }
+): string[] {
+  const cleanQ = questionText.replace(/\?+$/, '').trim();
+  const chunk1 = `${cleanQ}?`;
+  const optionsTextAll = `A: ${options.A}. B: ${options.B}. C: ${options.C}. D: ${options.D}.`;
+
+  if (optionsTextAll.length <= 180) {
+    return [chunk1, optionsTextAll];
+  }
+
+  const optionsAB = `A: ${options.A}. B: ${options.B}.`;
+  const optionsCD = `C: ${options.C}. D: ${options.D}.`;
+  return [chunk1, optionsAB, optionsCD];
+}
+
+/**
+ * Main function: readQuestionImmediately
+ */
+export function readQuestionImmediately(
+  questionText: string,
+  options: { A: string; B: string; C: string; D: string },
+  opts: SpeakOptions = {}
+) {
+  const chunks = createQuestionChunks(questionText, options);
+  readTextImmediately(chunks, opts);
+}
+
+/**
+ * Main function: readFeedbackExplanation
+ * Thuyết minh sau khi học sinh trả lời (Lời khen / khích lệ & giải thích đáp án)
+ */
+export function readFeedbackExplanation(
+  isCorrect: boolean,
+  praiseOrEncouragement: string,
+  correctOptionKey: string,
+  correctOptionText: string,
+  rationale: string,
+  opts: SpeakOptions = {}
+) {
+  const statusLine = isCorrect
+    ? `Chính xác hoàn toàn!`
+    : `Cùng rút ra bài học!`;
+  
+  const praiseClean = praiseOrEncouragement.replace(/[🎉⭐💪🌟🌱]/g, '').trim();
+  const answerLine = `Đáp án đúng là ${correctOptionKey}: ${correctOptionText}.`;
+  const rationaleClean = rationale.replace(/^["'\s]+|["'\s]+$/g, '').trim();
+
+  readTextImmediately([statusLine, praiseClean, answerLine, rationaleClean], opts);
 }
 
 export function initVoiceEngine() {

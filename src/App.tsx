@@ -498,6 +498,7 @@ export default function App() {
         question={currentQuestion}
         praiseOrEncouragement={praiseOrEncouragement}
         isLastQuestion={currentIndex === questions.length - 1}
+        autoReadFeedback={autoRead}
         onProceed={handleProceedNext}
       />
 
