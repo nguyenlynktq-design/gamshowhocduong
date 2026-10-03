@@ -1,0 +1,6 @@
+{
+  "name": "Ai Là Triệu Phú - Gameshow Học Đường",
+  "description": "Gameshow giáo dục tương tác truyền hình 'Ai Là Triệu Phú' - Chủ đề: Chung tay đẩy lùi ma túy với hệ thống câu hỏi tình huống dữ kiện, mô phỏng trường quay, âm thanh kịch tính, quyền trợ giúp và chế độ giáo viên.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
