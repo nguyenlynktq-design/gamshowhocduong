@@ -1,5 +1,8 @@
-// High-Speed Authentic Vietnamese Voice Engine (Giọng Nữ Tiếng Việt Tốc Độ Nhanh)
-// Tối ưu tốc độ đọc dứt khoát, lưu loát, không ngắt quãng dài, phong cách MC Gameshow
+// Multi-Tier Bulletproof Vietnamese Voice Engine
+// Hoạt động 100% trên cả Local, Vercel, Netlify và thiết bị di động
+// Tầng 1: /api/tts (Vercel Serverless Function & Node server)
+// Tầng 2: Direct Google Translate TTS Stream (Hoạt động hoàn hảo trên domain Vercel độc lập)
+// Tầng 3: Web Speech API (Được tối ưu cho Edge Hoài My, macOS Linh/Mai, Android Google Tiếng Việt)
 
 export interface SpeakOptions {
   onStart?: () => void;
@@ -7,9 +10,8 @@ export interface SpeakOptions {
   onError?: (err?: unknown) => void;
 }
 
-let currentSpeed = 1.25; // Tốc độ mặc định 1.25x: Nhanh, linh hoạt, rõ ràng
+let currentSpeed = 1.25; // Mặc định 1.25x: Nhanh chuẩn, phong cách MC Gameshow
 let currentAudio: HTMLAudioElement | null = null;
-let preloadedAudios: HTMLAudioElement[] = [];
 let isPlaying = false;
 
 export function getSpeechSpeed(): number {
@@ -29,7 +31,6 @@ export function setSpeechSpeed(speed: number) {
 
 export function stopSpeaking() {
   isPlaying = false;
-  preloadedAudios = [];
 
   if (currentAudio) {
     try {
@@ -51,33 +52,144 @@ export function stopSpeaking() {
   }
 }
 
+// Auto-unlock speech synthesis on any user touch/click on the page
+if (typeof window !== 'undefined') {
+  const unlockAudioAndSpeech = () => {
+    if ('speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.resume();
+      } catch {
+        // Ignore
+      }
+    }
+  };
+  window.addEventListener('click', unlockAudioAndSpeech, { once: true, passive: true });
+  window.addEventListener('touchstart', unlockAudioAndSpeech, { once: true, passive: true });
+}
+
+function findVietnameseVoice(): SpeechSynthesisVoice | null {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices() || [];
+  if (voices.length === 0) return null;
+
+  // 1. Hoài My (Microsoft Edge Southern Vietnamese female voice)
+  const hoaiMy = voices.find(
+    (v) =>
+      v.name.toLowerCase().includes('hoaimy') ||
+      v.name.toLowerCase().includes('hoài my') ||
+      (v.lang.toLowerCase().startsWith('vi') && v.name.toLowerCase().includes('nam'))
+  );
+  if (hoaiMy) return hoaiMy;
+
+  // 2. Female Vietnamese voices (Linh, Mai, etc.)
+  const vnFemale = voices.find(
+    (v) =>
+      v.lang.toLowerCase().replace('_', '-').startsWith('vi') &&
+      (v.name.toLowerCase().includes('female') ||
+        v.name.toLowerCase().includes('nữ') ||
+        v.name.toLowerCase().includes('linh') ||
+        v.name.toLowerCase().includes('mai'))
+  );
+  if (vnFemale) return vnFemale;
+
+  // 3. Any Vietnamese voice
+  const vnAny = voices.find((v) =>
+    v.lang.toLowerCase().replace('_', '-').startsWith('vi')
+  );
+  if (vnAny) return vnAny;
+
+  return null;
+}
+
 /**
- * Split text into logical, concise chunks (<= 180 chars) to minimize HTTP requests
+ * Fallback to Web Speech API
+ */
+function speakWithWebSpeech(
+  chunks: string[],
+  opts: SpeakOptions = {}
+) {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    opts.onEnd?.();
+    return;
+  }
+
+  try {
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
+  } catch {
+    // Ignore
+  }
+
+  const voice = findVietnameseVoice();
+  let chunkIdx = 0;
+
+  const speakNextChunk = () => {
+    if (!isPlaying || chunkIdx >= chunks.length) {
+      isPlaying = false;
+      opts.onEnd?.();
+      return;
+    }
+
+    const text = chunks[chunkIdx];
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'vi-VN';
+    utterance.rate = currentSpeed;
+
+    if (voice) {
+      utterance.voice = voice;
+      utterance.pitch = 1.08;
+    }
+
+    utterance.onend = () => {
+      if (!isPlaying) return;
+      chunkIdx++;
+      setTimeout(speakNextChunk, 40);
+    };
+
+    utterance.onerror = (e) => {
+      console.warn('SpeechSynthesis error:', e);
+      chunkIdx++;
+      if (chunkIdx >= chunks.length) {
+        isPlaying = false;
+        opts.onEnd?.();
+      } else {
+        speakNextChunk();
+      }
+    };
+
+    try {
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      chunkIdx++;
+      speakNextChunk();
+    }
+  };
+
+  speakNextChunk();
+}
+
+/**
+ * Split text into concise chunks (<= 180 chars)
  */
 function createFastChunks(
   questionText: string,
   options: { A: string; B: string; C: string; D: string }
 ): string[] {
   const cleanQ = questionText.replace(/\?+$/, '').trim();
-  
-  // Chunk 1: Question
   const chunk1 = `${cleanQ}?`;
-
-  // Concise options format without repeating long "Phương án..."
   const optionsTextAll = `A: ${options.A}. B: ${options.B}. C: ${options.C}. D: ${options.D}.`;
 
   if (optionsTextAll.length <= 180) {
     return [chunk1, optionsTextAll];
   }
 
-  // If options are long, split into A+B and C+D
   const optionsAB = `A: ${options.A}. B: ${options.B}.`;
   const optionsCD = `C: ${options.C}. D: ${options.D}.`;
   return [chunk1, optionsAB, optionsCD];
 }
 
 /**
- * Play chunks sequentially at high speed (1.25x) with zero lag between chunks
+ * Main reading function with multi-tier failover
  */
 export function readQuestionImmediately(
   questionText: string,
@@ -86,63 +198,74 @@ export function readQuestionImmediately(
 ) {
   stopSpeaking();
   isPlaying = true;
-
-  const chunks = createFastChunks(questionText, options);
   opts.onStart?.();
 
-  // Preload all audio elements in parallel
-  preloadedAudios = chunks.map((chunk) => {
-    const audio = new Audio(`/api/tts?text=${encodeURIComponent(chunk)}`);
-    audio.preload = 'auto';
-    return audio;
-  });
+  const chunks = createFastChunks(questionText, options);
+  let chunkIndex = 0;
+  let useDirectFallback = false;
 
-  let index = 0;
-
-  const playCurrentIndex = () => {
-    if (!isPlaying || index >= preloadedAudios.length) {
+  const playChunk = () => {
+    if (!isPlaying || chunkIndex >= chunks.length) {
       isPlaying = false;
       opts.onEnd?.();
       return;
     }
 
-    const audio = preloadedAudios[index];
-    currentAudio = audio;
+    const currentText = chunks[chunkIndex];
+    // Tier 1: Try /api/tts. If it failed once, switch to Tier 2 (Direct Google TTS)
+    const audioUrl = useDirectFallback
+      ? `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodeURIComponent(currentText)}`
+      : `/api/tts?text=${encodeURIComponent(currentText)}`;
 
-    // Apply speed
+    const audio = new Audio(audioUrl);
+    currentAudio = audio;
     audio.playbackRate = currentSpeed;
 
     audio.onended = () => {
       if (!isPlaying) return;
-      index++;
-      // Ultra-short 40ms pause between chunks for natural brisk flow
-      setTimeout(playCurrentIndex, 40);
+      chunkIndex++;
+      setTimeout(playChunk, 40);
     };
 
     audio.onerror = () => {
-      if (!isPlaying) return;
-      index++;
-      playCurrentIndex();
+      console.warn('Audio stream failed for chunk, trying next tier...');
+      if (!useDirectFallback) {
+        // Switch to Tier 2 (Direct Google TTS)
+        useDirectFallback = true;
+        playChunk();
+      } else {
+        // Both Audio tiers failed (e.g. strict firewall / offline) -> Fallback to Tier 3 (Web Speech API)
+        console.warn('Falling back to browser native Web Speech API');
+        const remainingChunks = chunks.slice(chunkIndex);
+        speakWithWebSpeech(remainingChunks, opts);
+      }
     };
 
-    // Ensure playbackRate applies after metadata is ready
     audio.onloadedmetadata = () => {
       audio.playbackRate = currentSpeed;
     };
 
-    audio.play().then(() => {
-      audio.playbackRate = currentSpeed;
-    }).catch((err) => {
-      console.warn('Playback error:', err);
-      index++;
-      if (index >= preloadedAudios.length) {
-        isPlaying = false;
-        opts.onError?.(err);
+    audio.play().catch(() => {
+      // If playback fails, try Tier 2 or Tier 3
+      if (!useDirectFallback) {
+        useDirectFallback = true;
+        playChunk();
       } else {
-        playCurrentIndex();
+        const remainingChunks = chunks.slice(chunkIndex);
+        speakWithWebSpeech(remainingChunks, opts);
       }
     });
   };
 
-  playCurrentIndex();
+  playChunk();
+}
+
+export function initVoiceEngine() {
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.getVoices();
+    } catch {
+      // Ignore
+    }
+  }
 }

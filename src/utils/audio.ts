@@ -15,9 +15,25 @@ export function getAudioContext(): AudioContext | null {
     }
   }
   if (audioCtx && audioCtx.state === 'suspended') {
-    audioCtx.resume();
+    audioCtx.resume().catch(() => {});
   }
   return audioCtx;
+}
+
+if (typeof window !== 'undefined') {
+  const unlockAudioContext = () => {
+    try {
+      const ctx = getAudioContext();
+      if (ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+    } catch {
+      // Ignore
+    }
+  };
+  window.addEventListener('click', unlockAudioContext, { once: true, passive: true });
+  window.addEventListener('touchstart', unlockAudioContext, { once: true, passive: true });
+  window.addEventListener('keydown', unlockAudioContext, { once: true, passive: true });
 }
 
 export function playTone(
